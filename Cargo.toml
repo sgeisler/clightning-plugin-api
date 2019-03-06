@@ -1,0 +1,11 @@
+[package]
+name = "clightning-plugin-api"
+version = "0.1.0"
+authors = ["Sebastian Geisler <sebastian@blockstream.io>"]
+edition = "2018"
+
+[dependencies]
+clightningrpc = "0.1.0"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
