@@ -9,6 +9,32 @@ pub use clightningrpc::LightningRPC;
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::io::{BufRead, BufReader, Write};
+
+#[derive(Deserialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    method: String,
+    params: Option<serde_json::Value>,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct JsonRpcResponse<T> {
+    jsonrpc: String,
+    result: T,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct InitResult {
+    options: &'static [CmdOptionMeta],
+    rpcmethods: Vec<RpcMethodMeta>,
+    subscriptions: Vec<Subscription>
+}
+
+#[derive(Serialize)]
+enum Subscription {}
 
 pub struct Plugin<'a, O: CmdOptions + Sync, C: Sync> {
     context: &'a C,
@@ -59,11 +85,11 @@ impl<'a, O, C> Plugin<'a, O, C>
     pub fn mount_rpc<M>(mut self, rpc_method: M) -> Self
         where M: 'static + RpcCallable<O, C>
     {
-        if self.rpcs.contains_key(rpc_method.name()) {
+        if self.rpcs.contains_key(rpc_method.meta().name) {
             panic!("Tried to mount two rpc methods with the same name");
         }
 
-        self.rpcs.insert(rpc_method.name().to_owned(), Box::new(rpc_method));
+        self.rpcs.insert(rpc_method.meta().name.to_owned(), Box::new(rpc_method));
         self
     }
 
@@ -87,6 +113,45 @@ impl<'a, O, C> Plugin<'a, O, C>
             params
         );
     }
+
+    pub fn run(&self) {
+        let mut stdin = BufReader::new(std::io::stdin());
+        let mut stdout = std::io::stdout();
+
+        for line in stdin.lines() {
+            let line = line.expect("IO error");
+
+            if line == "\n" || line.len() == 0 {
+                continue;
+            }
+
+            let request: JsonRpcRequest = match serde_json::from_str(&line) {
+                Ok(request) => request,
+                Err(e) => {
+                    eprintln!("Error parsing request: {:?}", e);
+                    continue;
+                },
+            };
+
+            match request.method.as_str() {
+                "getmanifest" => {
+                    serde_json::to_writer(&mut stdout, &JsonRpcResponse {
+                        jsonrpc: "2.0".to_owned(),
+                        result: InitResult {
+                            options: O::options(),
+                            rpcmethods: self.rpcs.values().map(|rpc| rpc.meta()).collect(),
+                            subscriptions: vec![]
+                        },
+                        id: request.id
+                    }).unwrap();
+                    write!(&mut stdout, "\n\n");
+                },
+                m => {
+                    eprintln!("Unexpected method {}", m);
+                }
+            }
+        }
+    }
 }
 
 pub trait RpcMethodParams : serde::de::DeserializeOwned {
@@ -100,8 +165,8 @@ pub struct RpcMethod<O, C, P, R, F>
           R: serde::Serialize,
           F: Fn(PluginContext<O, C>, P) -> R,
 {
-    name: String,
-    description: String,
+    name: &'static str,
+    description: &'static str,
     action: F,
     _phantom: PhantomData<(O, C, P, R)>
 }
@@ -113,7 +178,7 @@ impl<O, C, P, R, F> RpcMethod<O, C, P, R, F>
           R: serde::Serialize,
           F: Fn(PluginContext<O, C>, P) -> R,
 {
-    pub fn new(name: String, description: String, action: F) -> Self {
+    pub fn new(name: &'static str, description: &'static str, action: F) -> Self {
         RpcMethod {
             name,
             description,
@@ -127,9 +192,7 @@ pub trait RpcCallable<O, C>
     where O: CmdOptions + Sync,
           C: Sync,
 {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn usage(&self) -> &str;
+    fn meta(&self) -> RpcMethodMeta;
     fn call(&self, ctx: PluginContext<O, C>, params: serde_json::Value) -> serde_json::Value;
 }
 
@@ -140,22 +203,23 @@ impl<O, C, P, R, F> RpcCallable<O, C> for RpcMethod<O, C, P, R, F>
           R: serde::Serialize,
           F: Fn(PluginContext<O, C>, P) -> R,
 {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn usage(&self) -> &str {
-        <P as RpcMethodParams>::usage()
+    fn meta(&self) -> RpcMethodMeta {
+        RpcMethodMeta {
+            name: self.name,
+            description: self.description,
+        }
     }
 
     fn call(&self, ctx: PluginContext<O, C>, params: serde_json::Value) -> serde_json::Value {
         let params: P = serde_json::from_value(params).unwrap();
         serde_json::to_value(self.action.call((ctx, params))).unwrap()
     }
+}
+
+#[derive(Serialize)]
+pub struct RpcMethodMeta {
+    name: &'static str,
+    description: &'static str,
 }
 
 enum PluginState<O>
@@ -172,9 +236,9 @@ pub struct PluginContext<'a, O, C>
     where C: Sync,
           O: CmdOptions + Sync
 {
-    options: &'a O,
-    lightningd: &'a LightningRPC,
-    context: &'a C,
+    pub options: &'a O,
+    pub lightningd: &'a LightningRPC,
+    pub context: &'a C,
 }
 
 pub trait CmdOptions : serde::de::DeserializeOwned {
@@ -232,8 +296,8 @@ mod tests {
 
         let mut plugin = Plugin::<(), _>::with_context(&ctx)
             .mount_rpc(RpcMethod::new(
-                "hello_world".to_owned(),
-                "test rpc call".to_owned(),
+                "hello_world",
+                "test rpc call",
                 |ctx: PluginContext<(), TestContext>, request: TestRequest| {
                     ctx.context.state.store(request.state, Ordering::Relaxed);
                 }
