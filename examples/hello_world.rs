@@ -19,7 +19,7 @@ struct TestRequest {
 // This would be automaticcally derived
 impl RpcMethodParams for TestRequest {
     fn usage() -> &'static str {
-        "name"
+        "new_state"
     }
 }
 
@@ -33,7 +33,7 @@ fn main() {
     let mut plugin = Plugin::<NoOptions, _>::with_context(&ctx)
         .mount_rpc(RpcMethod::new(
             "hello_world",
-            "test rpc call",
+            "test rpc call that changes some boolean state",
             |ctx: PluginContext<NoOptions, TestContext>, request: TestRequest| {
                 let old = ctx.context.state.swap(request.state, Ordering::Relaxed);
                 if old != request.state {

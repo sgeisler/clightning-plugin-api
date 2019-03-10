@@ -268,6 +268,7 @@ impl<O, C, P, R, F> RpcCallable<O, C> for RpcMethod<O, C, P, R, F>
         RpcMethodMeta {
             name: self.name,
             description: self.description,
+            usage: P::usage(),
         }
     }
 
@@ -281,6 +282,7 @@ impl<O, C, P, R, F> RpcCallable<O, C> for RpcMethod<O, C, P, R, F>
 pub struct RpcMethodMeta {
     name: &'static str,
     description: &'static str,
+    usage: &'static str,
 }
 
 enum PluginState<O>
