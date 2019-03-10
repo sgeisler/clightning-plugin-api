@@ -16,21 +16,34 @@ struct JsonRpcRequest {
     jsonrpc: String,
     method: String,
     params: Option<serde_json::Value>,
-    id: String,
+    id: u64,
 }
 
 #[derive(Serialize)]
 struct JsonRpcResponse<T> {
     jsonrpc: String,
     result: T,
-    id: String,
+    id: u64,
 }
 
 #[derive(Serialize)]
-struct InitResult {
+struct ManifestResult {
     options: &'static [CmdOptionMeta],
     rpcmethods: Vec<RpcMethodMeta>,
     subscriptions: Vec<Subscription>
+}
+
+#[derive(Deserialize)]
+struct InitRequest<O> {
+    options: O,
+    configuration: LightningdConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct LightningdConfig {
+    lightning_dir: String,
+    rpc_file: String,
 }
 
 #[derive(Serialize)]
@@ -114,44 +127,92 @@ impl<'a, O, C> Plugin<'a, O, C>
         );
     }
 
-    pub fn run(&self) {
+    pub fn run(&mut self) {
         let mut stdin = BufReader::new(std::io::stdin());
         let mut stdout = std::io::stdout();
 
-        for line in stdin.lines() {
-            let line = line.expect("IO error");
-
-            if line == "\n" || line.len() == 0 {
-                continue;
-            }
-
-            let request: JsonRpcRequest = match serde_json::from_str(&line) {
-                Ok(request) => request,
-                Err(e) => {
-                    eprintln!("Error parsing request: {:?}", e);
-                    continue;
-                },
-            };
+        loop {
+            let request: JsonRpcRequest = read_obj(&mut stdin).expect("read json object");
 
             match request.method.as_str() {
                 "getmanifest" => {
                     serde_json::to_writer(&mut stdout, &JsonRpcResponse {
                         jsonrpc: "2.0".to_owned(),
-                        result: InitResult {
+                        result: ManifestResult {
                             options: O::options(),
                             rpcmethods: self.rpcs.values().map(|rpc| rpc.meta()).collect(),
                             subscriptions: vec![]
                         },
                         id: request.id
                     }).unwrap();
-                    write!(&mut stdout, "\n\n");
+                    write!(&mut stdout, "\n\n").unwrap();
                 },
-                m => {
-                    eprintln!("Unexpected method {}", m);
+                "init" => {
+                    let init_request: InitRequest<O> = serde_json::from_value(request.params.unwrap()).expect("error parsing init request");
+                    let init_state = PluginState::Initialized {
+                        options: init_request.options,
+                        lightningd: LightningRPC::new(std::path::Path::new(&format!(
+                                "{}/{}",
+                                init_request.configuration.lightning_dir,
+                                init_request.configuration.rpc_file
+                        ))),
+                    };
+                    self.plugin_state = init_state;
+                }
+                method => {
+                    match self.rpcs.get(method) {
+                        Some(rpc_method) => {
+                            let (options, lightningd) = match self.plugin_state {
+                                PluginState::Starting => {
+                                    eprintln!("plugin not initialized yet!");
+                                    continue;
+                                },
+                                PluginState::Initialized {
+                                    ref options,
+                                    ref lightningd,
+                                } => (options, lightningd),
+                            };
+
+                            let result = rpc_method.call(
+                                PluginContext {
+                                    options: options,
+                                    lightningd: lightningd,
+                                    context: self.context,
+                                },
+                                request.params.unwrap()
+                            );
+
+                            serde_json::to_writer(&mut stdout, &JsonRpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                result: result,
+                                id: request.id
+                            }).unwrap();
+                            write!(&mut stdout, "\n\n").unwrap();
+                        },
+                        None => {
+                            eprintln!("Unknown method: {}", method);
+                            continue;
+                        },
+                    }
                 }
             }
         }
     }
+}
+
+fn read_obj<R: BufRead, O: serde::de::DeserializeOwned>(reader: &mut R) -> serde_json::Result<O> {
+    let mut obj_str = String::new();
+
+    while obj_str.chars().all(|c| c.is_whitespace()) {
+        obj_str = reader.lines()
+            .map(|line| line.expect("io error"))
+            .take_while(|line| line.chars().any(|c| !c.is_whitespace()))
+            .collect::<Vec<_>>()
+            .concat();
+    }
+
+    eprintln!("Received: {}", obj_str);
+    serde_json::from_str(&obj_str)
 }
 
 pub trait RpcMethodParams : serde::de::DeserializeOwned {
@@ -245,9 +306,17 @@ pub trait CmdOptions : serde::de::DeserializeOwned {
     fn options() -> &'static [CmdOptionMeta];
 }
 
-impl CmdOptions for () {
+pub struct NoOptions;
+
+impl CmdOptions for NoOptions {
     fn options() -> &'static [CmdOptionMeta] {
         &[]
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NoOptions {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<NoOptions, D::Error> {
+        Ok(NoOptions)
     }
 }
 

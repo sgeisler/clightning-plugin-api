@@ -3,7 +3,7 @@ extern crate clightningrpc;
 #[macro_use] extern crate serde_derive;
 
 use clightningrpc::LightningRPC;
-use clightning_plugin_api::{Plugin, PluginContext, RpcMethod, RpcMethodParams};
+use clightning_plugin_api::{NoOptions, Plugin, PluginContext, RpcMethod, RpcMethodParams};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -30,12 +30,17 @@ fn main() {
         state: AtomicBool::new(false),
     };
 
-    let mut plugin = Plugin::<(), _>::with_context(&ctx)
+    let mut plugin = Plugin::<NoOptions, _>::with_context(&ctx)
         .mount_rpc(RpcMethod::new(
             "hello_world",
             "test rpc call",
-            |ctx: PluginContext<(), TestContext>, request: TestRequest| {
-                ctx.context.state.store(request.state, Ordering::Relaxed);
+            |ctx: PluginContext<NoOptions, TestContext>, request: TestRequest| {
+                let old = ctx.context.state.swap(request.state, Ordering::Relaxed);
+                if old != request.state {
+                    "State changed!"
+                } else {
+                    "State didn't change."
+                }
             }
         ));
 
