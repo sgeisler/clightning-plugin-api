@@ -136,7 +136,6 @@ impl<'a, O, C> Plugin<'a, O, C>
             };
             serde_json::to_writer(&mut stdout, &response).expect("IO error");
             write!(&mut stdout, "\n\n").expect("IO error");
-            eprintln!("sent {:?}", serde_json::to_string(&response));
         }
     }
 
