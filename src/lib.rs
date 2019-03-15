@@ -1,4 +1,12 @@
 #![feature(fn_traits)]
+#![deny(missing_docs)]
+
+//! # Plugin API for c-lightning
+//!
+//! This crate provides a framework to build c-lightning plugins. It abstracts away the JSON RPC
+//! communication and enables you to react to different event types. Since it's still moving quickly
+//! there aren't any examples in the docs, please have a look at the `examples` directory. The
+//! `README.md` also contains an overview of the demonstrated features.
 
 extern crate clightningrpc;
 extern crate serde;
@@ -25,7 +33,7 @@ struct JsonRpcRequest<T> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum JsonRpcResult<T> {
+enum JsonRpcResult<T> {
     Result(T),
     Error(RpcError),
 }
@@ -58,24 +66,34 @@ struct LightningdConfig {
     rpc_file: String,
 }
 
+/// Internal enum to represent event callbacks
 pub enum Subscription<O: CmdOptions + Sync, C: Sync> {
+    /// Connect event
     Connect(Box<dyn Fn(PluginContext<O, C>, ConnectEvent)>),
+    /// Disconnect event
     Disconnect(Box<dyn Fn(PluginContext<O, C>, DisconnectEvent)>),
 }
 
+/// Internal trait for event closure arguments
 pub trait Event {
+    /// Convert user-provided closure to "type-erased" `Subscription` enum
     fn subscription<O, C, F>(event_fn: F) -> Subscription<O, C>
         where O: 'static + CmdOptions + Sync,
               C: 'static + Sync,
               F: 'static + Fn(PluginContext<O, C>, Self),
               Self: Sized;
 
+    /// event name as c-lightning sends it
     fn name() -> &'static str;
 }
 
+/// Data received when we get a new connection to another node
 #[derive(Deserialize)]
 pub struct ConnectEvent {
+    /// Id of the newly connected node
     pub id: String,
+
+    /// Network address of the newly connected node
     pub address: NetworkAddress,
 }
 
@@ -94,7 +112,9 @@ impl Event for ConnectEvent {
 }
 
 #[derive(Deserialize)]
+/// Data received when a node disconnects from us
 pub struct DisconnectEvent {
+    /// Id of the disconnected node
     pub id: String,
 }
 
@@ -112,6 +132,7 @@ impl Event for DisconnectEvent {
     }
 }
 
+/// Main plugin structure to register RPC methods, options and events with
 pub struct Plugin<O: CmdOptions + Sync, C: Sync> {
     context: Arc<C>,
     rpcs: HashMap<String, Box<dyn RpcCallable<O, C>>>,
@@ -124,6 +145,7 @@ impl<O, C> Plugin<O, C>
     where O: 'static + CmdOptions + Sync,
           C: 'static + Sync,
 {
+    /// Initialize plugin without global state (without context)
     pub fn new() -> Plugin<O, ()> {
         Plugin {
             context: Arc::new(()),
@@ -134,6 +156,7 @@ impl<O, C> Plugin<O, C>
         }
     }
 
+    /// Initialize plugin with global state (context)
     pub fn with_context(context: Arc<C>) -> Plugin<O, C> {
         Plugin {
             context,
@@ -144,6 +167,7 @@ impl<O, C> Plugin<O, C>
         }
     }
 
+    /// Register an RPC method that will be exposed to the user
     pub fn mount_rpc<M>(mut self, rpc_method: M) -> Self
         where M: 'static + RpcCallable<O, C>
     {
@@ -155,6 +179,8 @@ impl<O, C> Plugin<O, C>
         self
     }
 
+    /// Subscribe to an event type by specifying a closure that takes a `PluginContext` and an
+    /// event-specific data structure (implementing `Event`) as arguments.
     pub fn subscribe<F, E>(mut self, event_fn: F) -> Self
         where E: Event,
               F: 'static + Fn(PluginContext<O, C>, E),
@@ -170,6 +196,7 @@ impl<O, C> Plugin<O, C>
         self
     }
 
+    /// Run the plugin till it gets killed by lightningd
     pub fn run(&mut self) {
         let mut stdin = BufReader::new(std::io::stdin());
         let mut stdout = std::io::stdout();
@@ -345,10 +372,14 @@ fn read_obj<R: BufRead, O: serde::de::DeserializeOwned>(reader: &mut R) -> serde
     serde_json::from_str(&obj_str)
 }
 
+/// Trait that extracts meta data about RPC method parameter structs
 pub trait RpcMethodParams : serde::de::DeserializeOwned {
+    /// How to use the RPC method, e.g. `'arg1 [arg2]'` for one non-optional and one optional
+    /// argument
     fn usage() -> &'static str;
 }
 
+/// Type erased reference to a RPC method callback with some additional metadata
 pub struct RpcMethod<O, C, P, R, F>
     where O: CmdOptions + Sync,
           C: Sync,
@@ -369,6 +400,8 @@ impl<O, C, P, R, F> RpcMethod<O, C, P, R, F>
           R: serde::Serialize,
           F: Fn(PluginContext<O, C>, P) -> Result<R, RpcError>,
 {
+    /// Create a new type-erased RPC method callback object with additional meta data to be
+    /// displayed on the help page of `lightning-cli`
     pub fn new(name: &'static str, description: &'static str, action: F) -> Self {
         RpcMethod {
             name,
@@ -379,17 +412,25 @@ impl<O, C, P, R, F> RpcMethod<O, C, P, R, F>
     }
 }
 
+/// Error that can happen during RPC method execution
 #[derive(Debug, Serialize)]
 pub struct RpcError {
+    /// JSON RPC error code
     pub code: i64,
+
+    /// Custom message
     pub message: String,
 }
 
+/// Internal trait for `RpcMethod`
 pub trait RpcCallable<O, C>
     where O: CmdOptions + Sync,
           C: Sync,
 {
+    /// Get metadata
     fn meta(&self) -> RpcMethodMeta;
+
+    /// Invoke callback
     fn call(&self, ctx: PluginContext<O, C>, params: serde_json::Value) -> Result<serde_json::Value, RpcError>;
 }
 
@@ -416,10 +457,16 @@ impl<O, C, P, R, F> RpcCallable<O, C> for RpcMethod<O, C, P, R, F>
     }
 }
 
+/// RPC method meta data displayed as help to the user
 #[derive(Serialize)]
 pub struct RpcMethodMeta {
+    /// RPC method's name
     name: &'static str,
+
+    /// Description of what the RPC method does
     description: &'static str,
+
+    /// Argument list
     usage: &'static str,
 }
 
@@ -433,8 +480,10 @@ enum PluginState<O>
     }
 }
 
+/// Log level of log message
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(missing_docs)]
 pub enum LogLevel {
     Io,
     Debug,
@@ -444,17 +493,23 @@ pub enum LogLevel {
 }
 
 #[derive(Serialize)]
-pub struct LogMessage {
+struct LogMessage {
     pub level: LogLevel,
     pub message: String,
 }
 
+/// Plugin state
 pub struct PluginContext<'a, O, C>
     where C: Sync,
           O: CmdOptions + Sync
 {
+    /// Options received from c-lightning
     pub options: &'a O,
+
+    /// RPC client connected to lightningd
     pub lightningd: &'a LightningRPC,
+
+    /// User defined global state
     pub context: &'a C,
     log_sender: Sender<LogMessage>
 }
@@ -463,6 +518,7 @@ impl<'a, O, C> PluginContext<'a, O, C>
     where C: Sync,
           O: CmdOptions + Sync
 {
+    /// Log a message to lightningd's log output
     pub fn log(&self, level: LogLevel, message: String) {
         self.log_sender.send(LogMessage {
             level,
@@ -471,10 +527,13 @@ impl<'a, O, C> PluginContext<'a, O, C>
     }
 }
 
+/// Trait that gives meta information about command line option structs
 pub trait CmdOptions : serde::de::DeserializeOwned {
+    /// Command line options
     fn options() -> &'static [CmdOptionMeta];
 }
 
+/// If you don't want to have any options, use this (`()` doesn't deserialize correctly)
 pub struct NoOptions;
 
 impl CmdOptions for NoOptions {
@@ -489,18 +548,28 @@ impl<'de> serde::Deserialize<'de> for NoOptions {
     }
 }
 
+/// Option data types supported by c-lightning
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CmdOptionType {
+    /// String
     String,
 }
 
+/// Meta data about a command line option
 #[derive(Serialize)]
 pub struct CmdOptionMeta {
+    /// Command line option name (`--name`)
     pub name: &'static str,
+
+    /// Expected data type
     #[serde(rename = "type")]
     pub option_type: CmdOptionType,
+
+    /// Default if no input is provided
     pub default: &'static str,
+
+    /// Description of the command line option
     pub description: &'static str,
 }
 
