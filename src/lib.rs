@@ -11,17 +11,19 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 fn json_null() -> serde_json::Value {
     serde_json::Value::Null
 }
 
-#[derive(Deserialize)]
-struct JsonRpcRequest {
+#[derive(Deserialize, Serialize)]
+struct JsonRpcRequest<T> {
     jsonrpc: String,
     method: String,
-    #[serde(default = "json_null")]
-    params: serde_json::Value,
+    #[serde(default)]
+    params: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<u64>,
 }
 
@@ -119,6 +121,7 @@ pub struct Plugin<O: CmdOptions + Sync, C: Sync> {
     rpcs: HashMap<String, Box<dyn RpcCallable<O, C>>>,
     subscriptions: HashMap<String, Subscription<O, C>>,
     plugin_state: PluginState<O>,
+    log_channel: (Sender<LogMessage>, Receiver<LogMessage>),
 }
 
 impl<O, C> Plugin<O, C>
@@ -131,6 +134,7 @@ impl<O, C> Plugin<O, C>
             rpcs: HashMap::new(),
             subscriptions: HashMap::new(),
             plugin_state: PluginState::Starting,
+            log_channel: channel(),
         }
     }
 
@@ -140,6 +144,7 @@ impl<O, C> Plugin<O, C>
             rpcs: HashMap::new(),
             subscriptions: HashMap::new(),
             plugin_state: PluginState::Starting,
+            log_channel: channel(),
         }
     }
 
@@ -174,7 +179,21 @@ impl<O, C> Plugin<O, C>
         let mut stdout = std::io::stdout();
 
         loop {
-            let request: JsonRpcRequest = match read_obj(&mut stdin) {
+            // Print all log messages from previous round
+            for log_message in self.log_channel.1.try_iter() {
+                serde_json::to_writer(
+                    &mut stdout,
+                    &JsonRpcRequest {
+                        jsonrpc: "2.0".to_string(),
+                        method: "log".to_string(),
+                        params: log_message,
+                        id: None
+                    }
+                ).expect("IO error");
+                write!(&mut stdout, "\n\n").expect("IO error");
+            }
+
+            let request: JsonRpcRequest<serde_json::Value> = match read_obj(&mut stdin) {
                 Ok(request) => request,
                 Err(e) => {
                     eprintln!("Couldn't parse request: {:?}", e);
@@ -292,6 +311,7 @@ impl<O, C> Plugin<O, C>
             options,
             lightningd,
             context: self.context.as_ref(),
+            log_sender: self.log_channel.0.clone(),
         })
     }
 }
@@ -417,6 +437,22 @@ enum PluginState<O>
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Io,
+    Debug,
+    Info,
+    Unusual,
+    Broken,
+}
+
+#[derive(Serialize)]
+pub struct LogMessage {
+    pub level: LogLevel,
+    pub message: String,
+}
+
 pub struct PluginContext<'a, O, C>
     where C: Sync,
           O: CmdOptions + Sync
@@ -424,6 +460,19 @@ pub struct PluginContext<'a, O, C>
     pub options: &'a O,
     pub lightningd: &'a LightningRPC,
     pub context: &'a C,
+    log_sender: Sender<LogMessage>
+}
+
+impl<'a, O, C> PluginContext<'a, O, C>
+    where C: Sync,
+          O: CmdOptions + Sync
+{
+    pub fn log(&self, level: LogLevel, message: String) {
+        self.log_sender.send(LogMessage {
+            level,
+            message,
+        }).expect("main thread died?");
+    }
 }
 
 pub trait CmdOptions : serde::de::DeserializeOwned {
