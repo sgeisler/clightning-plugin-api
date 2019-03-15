@@ -1,4 +1,4 @@
-# Rust API for c-lightning plugins
+# Rust API for c-lightning plugins [![Build Status](https://travis-ci.org/sgeisler/clightning-plugin-api.svg?branch=master)](https://travis-ci.org/sgeisler/clightning-plugin-api)
 
 This is my first attempt at building a strongly typed, yet ergonomic API for the [c-lightning plugin API](https://github.com/ElementsProject/lightning/blob/master/doc/PLUGINS.md).
 

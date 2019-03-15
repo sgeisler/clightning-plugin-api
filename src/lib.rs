@@ -577,18 +577,17 @@ pub struct CmdOptionMeta {
 mod tests {
     #[test]
     fn rpc() {
-        use clightningrpc::LightningRPC;
         use crate::{NoOptions, Plugin, PluginContext, RpcMethod, RpcMethodParams};
-        use std::path::Path;
+        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
         struct TestContext {
             state: AtomicBool,
         }
 
-        let ctx = TestContext {
+        let ctx = Arc::new(TestContext {
             state: AtomicBool::new(false),
-        };
+        });
 
         #[derive(Deserialize)]
         struct TestRequest {
@@ -602,7 +601,7 @@ mod tests {
             }
         }
 
-        let mut plugin = Plugin::<NoOptions, _>::with_context(&ctx)
+        let mut plugin = Plugin::<NoOptions, _>::with_context(ctx.clone())
             .mount_rpc(RpcMethod::new(
                 "hello_world",
                 "test rpc call",
