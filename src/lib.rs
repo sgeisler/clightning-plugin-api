@@ -5,11 +5,12 @@ extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate serde_json;
 
-pub use clightningrpc::LightningRPC;
+pub use clightningrpc::{LightningRPC, responses::NetworkAddress};
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::Arc;
 
 fn json_null() -> serde_json::Value {
     serde_json::Value::Null
@@ -21,7 +22,7 @@ struct JsonRpcRequest {
     method: String,
     #[serde(default = "json_null")]
     params: serde_json::Value,
-    id: u64,
+    id: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -40,10 +41,10 @@ struct JsonRpcResponse<T> {
 }
 
 #[derive(Serialize)]
-struct ManifestResult {
+struct ManifestResult<> {
     options: &'static [CmdOptionMeta],
     rpcmethods: Vec<RpcMethodMeta>,
-    subscriptions: Vec<Subscription>
+    subscriptions: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -59,31 +60,85 @@ struct LightningdConfig {
     rpc_file: String,
 }
 
-#[derive(Serialize)]
-enum Subscription {}
+pub enum Subscription<O: CmdOptions + Sync, C: Sync> {
+    Connect(Box<dyn Fn(PluginContext<O, C>, ConnectEvent)>),
+    Disconnect(Box<dyn Fn(PluginContext<O, C>, DisconnectEvent)>),
+}
 
-pub struct Plugin<'a, O: CmdOptions + Sync, C: Sync> {
-    context: &'a C,
+pub trait Event {
+    fn subscription<O, C, F>(event_fn: F) -> Subscription<O, C>
+        where O: 'static + CmdOptions + Sync,
+              C: 'static + Sync,
+              F: 'static + Fn(PluginContext<O, C>, Self),
+              Self: Sized;
+
+    fn name() -> &'static str;
+}
+
+#[derive(Deserialize)]
+pub struct ConnectEvent {
+    pub id: String,
+    pub address: NetworkAddress,
+}
+
+impl Event for ConnectEvent {
+    fn subscription<O, C, F>(event_fn: F) -> Subscription<O, C>
+        where O: 'static + CmdOptions + Sync,
+              C: 'static + Sync,
+              F: 'static + Fn(PluginContext<O, C>, Self)
+    {
+        Subscription::Connect(Box::new(event_fn))
+    }
+
+    fn name() -> &'static str {
+        "connect"
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DisconnectEvent {
+    pub id: String,
+}
+
+impl Event for DisconnectEvent {
+    fn subscription<'a, O, C, F>(event_fn: F) -> Subscription<O, C>
+        where O: 'static + CmdOptions + Sync,
+              C: 'static + Sync,
+              F: 'static + Fn(PluginContext<O, C>, Self)
+    {
+        Subscription::Disconnect(Box::new(event_fn))
+    }
+
+    fn name() -> &'static str {
+        "disconnect"
+    }
+}
+
+pub struct Plugin<O: CmdOptions + Sync, C: Sync> {
+    context: Arc<C>,
     rpcs: HashMap<String, Box<dyn RpcCallable<O, C>>>,
+    subscriptions: HashMap<String, Subscription<O, C>>,
     plugin_state: PluginState<O>,
 }
 
-impl<'a, O, C> Plugin<'a, O, C>
-    where O: CmdOptions + Sync,
-          C: Sync,
+impl<O, C> Plugin<O, C>
+    where O: 'static + CmdOptions + Sync,
+          C: 'static + Sync,
 {
-    pub fn new() -> Plugin<'a, O, ()> {
+    pub fn new() -> Plugin<O, ()> {
         Plugin {
-            context: &(),
+            context: Arc::new(()),
             rpcs: HashMap::new(),
+            subscriptions: HashMap::new(),
             plugin_state: PluginState::Starting,
         }
     }
 
-    pub fn with_context(context: &'a C) -> Plugin<'a, O, C> {
+    pub fn with_context(context: Arc<C>) -> Plugin<O, C> {
         Plugin {
             context,
             rpcs: HashMap::new(),
+            subscriptions: HashMap::new(),
             plugin_state: PluginState::Starting,
         }
     }
@@ -96,6 +151,21 @@ impl<'a, O, C> Plugin<'a, O, C>
         }
 
         self.rpcs.insert(rpc_method.meta().name.to_owned(), Box::new(rpc_method));
+        self
+    }
+
+    pub fn subscribe<F, E>(mut self, event_fn: F) -> Self
+        where E: Event,
+              F: 'static + Fn(PluginContext<O, C>, E),
+    {
+        let subscription = E::subscription(event_fn);
+        let event_name = E::name();
+
+        if self.subscriptions.contains_key(event_name) {
+            panic!("Tried to subscribe to the same event twice.");
+        }
+
+        self.subscriptions.insert(event_name.to_owned(), subscription);
         self
     }
 
@@ -116,36 +186,62 @@ impl<'a, O, C> Plugin<'a, O, C>
                 "getmanifest" => self.handle_getmanifest(),
                 "init" => {
                     match self.handle_init(request.params) {
-                        Ok(()) => {},
+                        Ok(()) => {
+                            // clightning doesn't expect an answer
+                            continue;
+                        },
                         Err(e) => {
                             eprintln!("Couldn't process init message: {:?}", e);
                             // shut down, there is nothing we can do to recover
                             return;
                         },
                     }
-                    // clightning doesn't expect an answer
+                },
+                event if self.subscriptions.contains_key(event) => {
+                    match self.handle_event(event, request.params) {
+                        Ok(()) => {},
+                        Err(e) => {
+                            eprintln!("Couldn't process event '{}': {:?}", event, e);
+                        },
+                    };
                     continue;
-                }
+                },
                 method => self.handle_rpc_call(method, request.params),
             };
 
             let response = JsonRpcResponse {
                 jsonrpc: "2.0".to_string(),
                 result: result.into(),
-                id: request.id
+                id: request.id.expect("this request should have an ID"),
             };
             serde_json::to_writer(&mut stdout, &response).expect("IO error");
             write!(&mut stdout, "\n\n").expect("IO error");
         }
     }
 
-
+    fn handle_event(&self, event: &str, params: serde_json::Value) -> Result<(), RpcError> {
+        match self.subscriptions.get(event) {
+            Some(Subscription::Connect(f)) => f.call((
+                self.get_plugin_context()?,
+                parse_params(params)?,
+                )),
+            Some(Subscription::Disconnect(f)) => f.call((
+                self.get_plugin_context()?,
+                parse_params(params)?,
+            )),
+            None => return Err(RpcError {
+                code: 0,
+                message: "unknown event".to_string()
+            }),
+        }
+        Ok(())
+    }
 
     fn handle_getmanifest(&self) -> Result<serde_json::Value, RpcError> {
         Ok(serde_json::to_value(ManifestResult {
             options: O::options(),
             rpcmethods: self.rpcs.values().map(|rpc| rpc.meta()).collect(),
-            subscriptions: vec![]
+            subscriptions: self.subscriptions.keys().cloned().collect(),
         }).expect("Serializing response failed"))
     }
 
@@ -174,6 +270,13 @@ impl<'a, O, C> Plugin<'a, O, C>
             }),
         };
 
+        method.call(
+            self.get_plugin_context()?,
+            params
+        )
+    }
+
+    fn get_plugin_context<'a>(&'a self) -> Result<PluginContext<'a, O, C>, RpcError> {
         let (options, lightningd) = match self.plugin_state {
             PluginState::Starting => return Err(RpcError {
                 code: -32603,
@@ -185,14 +288,11 @@ impl<'a, O, C> Plugin<'a, O, C>
             } => (options, lightningd),
         };
 
-        method.call(
-            PluginContext {
-                options: options,
-                lightningd: lightningd,
-                context: self.context,
-            },
-            params
-        )
+        Ok(PluginContext {
+            options,
+            lightningd,
+            context: self.context.as_ref(),
+        })
     }
 }
 

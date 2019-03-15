@@ -4,6 +4,7 @@ extern crate crossbeam;
 
 use clightning_plugin_api::{NoOptions, Plugin, PluginContext, RpcMethod, RpcMethodParams};
 use crossbeam::thread::scope;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 struct TestContext {
@@ -24,11 +25,11 @@ impl RpcMethodParams for TestRequest {
 
 
 fn main() {
-    let ctx = TestContext {
+    let ctx = Arc::new(TestContext {
         state: AtomicBool::new(false),
-    };
+    });
 
-    let mut plugin = Plugin::<NoOptions, _>::with_context(&ctx)
+    let mut plugin = Plugin::<NoOptions, _>::with_context(ctx.clone())
         .mount_rpc(RpcMethod::new(
             "set_state",
             "test rpc call that changes some boolean state",
@@ -42,7 +43,7 @@ fn main() {
             }
         ));
 
-    let status_thread = scope(|s| {
+    scope(|s| {
         s.spawn(|_|{
             loop {
                 eprintln!("Current state: {}", ctx.state.load(Ordering::Relaxed));
@@ -51,5 +52,5 @@ fn main() {
         });
 
         plugin.run();
-    });
+    }).unwrap();
 }
