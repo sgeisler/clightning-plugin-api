@@ -13,6 +13,7 @@ Missing features:
 * Derive macros for `CmdOptions` and `RpcMethodParams` traits and maybe a custom `DeserializeOptional` trait for
 RPC methods with optional parameters
 * Human readable error reporting
+* Support for stable rust (currently nightly only)
 
 # Usage
 
