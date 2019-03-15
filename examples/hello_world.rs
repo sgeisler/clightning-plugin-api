@@ -1,8 +1,8 @@
 extern crate clightning_plugin_api;
 extern crate clightningrpc;
-extern crate serde_derive;
+#[macro_use] extern crate serde_derive;
 
-use clightning_plugin_api::{NoOptions, Plugin, PluginContext, RpcMethod, RpcMethodParams};
+use clightning_plugin_api::{CmdOptionMeta, CmdOptionType, CmdOptions, Plugin, PluginContext, RpcMethod, RpcMethodParams};
 
 #[derive(Debug, Eq, PartialEq)]
 struct HelloWorldRequest {
@@ -31,18 +31,36 @@ impl RpcMethodParams for HelloWorldRequest {
     }
 }
 
+#[derive(Deserialize)]
+struct HelloWorldOptions {
+    default_name: String,
+}
+
+impl CmdOptions for HelloWorldOptions {
+    fn options() -> &'static [CmdOptionMeta] {
+        &[
+            CmdOptionMeta {
+                name: "default_name",
+                option_type: CmdOptionType::String,
+                default: "World",
+                description: "default name used when invoking `hello_world` without a name parameter",
+            }
+        ]
+    }
+}
+
 
 fn main() {
-    let mut plugin = Plugin::<NoOptions, ()>::new()
+    let mut plugin = Plugin::<HelloWorldOptions, ()>::new()
         .mount_rpc(RpcMethod::new(
             "hello_world",
             "test rpc call that changes some boolean state",
-            |_ctx: PluginContext<NoOptions, ()>, request: HelloWorldRequest| {
+            |ctx: PluginContext<HelloWorldOptions, ()>, request: HelloWorldRequest| {
                 let mut response = String::new();
 
                 response += &format!(
                     "Hello {}!",
-                    request.name.unwrap_or("World".into())
+                    request.name.unwrap_or(ctx.options.default_name.clone())
                 );
 
                 if let Some(message) = request.message {

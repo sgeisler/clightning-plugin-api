@@ -13,10 +13,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-fn json_null() -> serde_json::Value {
-    serde_json::Value::Null
-}
-
 #[derive(Deserialize, Serialize)]
 struct JsonRpcRequest<T> {
     jsonrpc: String,
@@ -502,6 +498,7 @@ pub enum CmdOptionType {
 #[derive(Serialize)]
 pub struct CmdOptionMeta {
     pub name: &'static str,
+    #[serde(rename = "type")]
     pub option_type: CmdOptionType,
     pub default: &'static str,
     pub description: &'static str,
