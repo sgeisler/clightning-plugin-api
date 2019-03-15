@@ -1,9 +1,7 @@
 extern crate clightning_plugin_api;
-extern crate crossbeam;
 #[macro_use] extern crate serde_derive;
 
 use clightning_plugin_api::{NoOptions, Plugin, PluginContext, RpcMethod, RpcMethodParams};
-use crossbeam::thread::scope;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -43,8 +41,7 @@ fn main() {
             }
         ));
 
-    scope(|s| {
-        s.spawn(|_|{
+        std::thread::spawn(move ||{
             loop {
                 eprintln!("Current state: {}", ctx.state.load(Ordering::Relaxed));
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -52,5 +49,4 @@ fn main() {
         });
 
         plugin.run();
-    }).unwrap();
 }
